@@ -4,7 +4,9 @@
       "Bash(chmod:*)",
       "Bash(alias gtssh:*)",
       "Read(//Users/sdbuch/**)",
-      "Bash(gcloud compute:*)"
+      "Bash(gcloud compute:*)",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "WebFetch(domain:arxiv.org)"
     ]
   }
 }

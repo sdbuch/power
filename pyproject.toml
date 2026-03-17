@@ -1,0 +1,39 @@
+[build-system]
+requires = ["uv_build>=0.8.22,<0.9.0"]
+build-backend = "uv_build"
+
+[project]
+name = "power"
+version = "0.1.0"
+requires-python = ">=3.13"
+dependencies = []
+
+[tool.uv]
+config-settings = { editable_mode = 'compat' }
+
+[tool.uv.build-backend]
+module-name = "power"
+
+[tool.uv.sources]
+power = { path = ".", editable = true }
+
+[tool.ruff]
+line-length = 88
+indent-width = 2
+
+[tool.ruff.format]
+indent-style = "space"
+
+[tool.ruff.lint]
+fixable = ["ALL"]
+unfixable = []
+
+select = ["E", "W", "F"]  # Error, Warning, and Pyflakes rules
+
+ignore = [
+    "F401",  # Unused import
+    "F821",  # Undefined name
+    "E402",  # Module level import not at top of file
+    "F841",  # Local variable assigned but not used
+    "E731",  # use a def, not a lambda
+]

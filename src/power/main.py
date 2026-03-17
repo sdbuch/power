@@ -2,8 +2,8 @@ from dataclasses import dataclass
 
 import jax
 import jax.numpy as jnp
-from jax.experimental.multihost_utils import process_allgather
 import tyro
+from jax.experimental.multihost_utils import process_allgather
 
 from power.msign import newtonschulz5, polar_express
 
@@ -14,7 +14,7 @@ class Args:
   m: int = 512
   n: int = 256
   steps_ns5: int = 5
-  steps_polar: int = 10
+  steps_polar: int = 5
   seed: int = 42
 
 
@@ -36,9 +36,13 @@ def test_msign(args):
     result = newtonschulz5(G, steps=args.steps_ns5).astype(jnp.float32)
     err = jnp.linalg.norm(result - truth) / jnp.linalg.norm(truth)
     if args.m >= args.n:
-      orth_err = jnp.linalg.norm(result.mT @ result - jnp.eye(min_dim)) / jnp.linalg.norm(jnp.eye(min_dim))
+      orth_err = jnp.linalg.norm(
+        result.mT @ result - jnp.eye(min_dim)
+      ) / jnp.linalg.norm(jnp.eye(min_dim))
     else:
-      orth_err = jnp.linalg.norm(result @ result.mT - jnp.eye(min_dim)) / jnp.linalg.norm(jnp.eye(min_dim))
+      orth_err = jnp.linalg.norm(
+        result @ result.mT - jnp.eye(min_dim)
+      ) / jnp.linalg.norm(jnp.eye(min_dim))
     all_err = process_allgather(jnp.array([err]))
     all_orth = process_allgather(jnp.array([orth_err]))
     if jax.process_index() == 0:
@@ -50,9 +54,13 @@ def test_msign(args):
     result = polar_express(G, steps=args.steps_polar)
     err = jnp.linalg.norm(result - truth) / jnp.linalg.norm(truth)
     if args.m >= args.n:
-      orth_err = jnp.linalg.norm(result.mT @ result - jnp.eye(min_dim)) / jnp.linalg.norm(jnp.eye(min_dim))
+      orth_err = jnp.linalg.norm(
+        result.mT @ result - jnp.eye(min_dim)
+      ) / jnp.linalg.norm(jnp.eye(min_dim))
     else:
-      orth_err = jnp.linalg.norm(result @ result.mT - jnp.eye(min_dim)) / jnp.linalg.norm(jnp.eye(min_dim))
+      orth_err = jnp.linalg.norm(
+        result @ result.mT - jnp.eye(min_dim)
+      ) / jnp.linalg.norm(jnp.eye(min_dim))
     all_err = process_allgather(jnp.array([err]))
     all_orth = process_allgather(jnp.array([orth_err]))
     if jax.process_index() == 0:

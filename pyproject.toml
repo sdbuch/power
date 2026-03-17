@@ -8,8 +8,22 @@ version = "0.1.0"
 requires-python = ">=3.13"
 dependencies = []
 
+[project.optional-dependencies]
+cpu = [
+    "jax[cpu]>=0.9.1",
+]
+tpu = [
+    "jax[tpu]>=0.9.1",
+]
+
 [tool.uv]
 config-settings = { editable_mode = 'compat' }
+conflicts = [
+    [
+      { extra = "cpu" },
+      { extra = "tpu" },
+    ],
+]
 
 [tool.uv.build-backend]
 module-name = "power"

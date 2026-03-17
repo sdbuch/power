@@ -2,6 +2,7 @@ from dataclasses import dataclass
 
 import jax
 import jax.numpy as jnp
+from jax.experimental.multihost_utils import process_allgather
 import tyro
 
 from power.msign import newtonschulz5, polar_express
@@ -24,7 +25,8 @@ def svd_sign(G):
 
 
 def test_msign(args):
-  key = jax.random.key(args.seed)
+  local_seed = args.seed + jax.process_index()
+  key = jax.random.key(local_seed)
   G = jax.random.normal(key, (args.m, args.n))
   truth = svd_sign(G)
 
@@ -37,9 +39,12 @@ def test_msign(args):
       orth_err = jnp.linalg.norm(result.mT @ result - jnp.eye(min_dim))
     else:
       orth_err = jnp.linalg.norm(result @ result.mT - jnp.eye(min_dim))
-    print(f"NS5 (steps={args.steps_ns5}):")
-    print(f"  relative error vs SVD: {err:.6f}")
-    print(f"  orthogonality error:   {orth_err:.6f}")
+    all_err = process_allgather(jnp.array([err]))
+    all_orth = process_allgather(jnp.array([orth_err]))
+    if jax.process_index() == 0:
+      print(f"NS5 (steps={args.steps_ns5}, n_hosts={len(all_err)}):")
+      print(f"  mean relative error vs SVD: {jnp.mean(all_err):.6f}")
+      print(f"  mean orthogonality error:   {jnp.mean(all_orth):.6f}")
 
   if args.experiment in ("polar", "both"):
     result = polar_express(G, steps=args.steps_polar)
@@ -48,9 +53,12 @@ def test_msign(args):
       orth_err = jnp.linalg.norm(result.mT @ result - jnp.eye(min_dim))
     else:
       orth_err = jnp.linalg.norm(result @ result.mT - jnp.eye(min_dim))
-    print(f"Polar Express (steps={args.steps_polar}):")
-    print(f"  relative error vs SVD: {err:.6f}")
-    print(f"  orthogonality error:   {orth_err:.6f}")
+    all_err = process_allgather(jnp.array([err]))
+    all_orth = process_allgather(jnp.array([orth_err]))
+    if jax.process_index() == 0:
+      print(f"Polar Express (steps={args.steps_polar}, n_hosts={len(all_err)}):")
+      print(f"  mean relative error vs SVD: {jnp.mean(all_err):.6f}")
+      print(f"  mean orthogonality error:   {jnp.mean(all_orth):.6f}")
 
 
 def main():

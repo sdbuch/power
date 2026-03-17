@@ -6,6 +6,7 @@ Ports of:
     github.com/thinking-machines-lab/manifolds)
 """
 
+import jax
 import jax.numpy as jnp
 
 # Muon NS5: fixed quintic coefficients maximizing slope at zero.
@@ -30,6 +31,7 @@ _POLAR_EXPRESS_ABC_STABLE = [
 ] + [_POLAR_EXPRESS_ABC[-1]]
 
 
+@jax.jit(static_argnames=("steps",))
 def newtonschulz5(G, steps=5):
   """Newton-Schulz iteration with fixed quintic coefficients (Muon-style).
 
@@ -55,11 +57,12 @@ def newtonschulz5(G, steps=5):
   return X
 
 
+@jax.jit(static_argnames=("steps",))
 def polar_express(G, steps=10):
   """Polar Express matrix sign function.
 
   Uses step-dependent polynomial coefficients for faster convergence.
-  Returns float32.
+  Returns bfloat16.
   """
   assert G.ndim >= 2
   X = G.astype(jnp.bfloat16)
@@ -80,4 +83,4 @@ def polar_express(G, steps=10):
 
   if transposed:
     X = X.mT
-  return jnp.nan_to_num(X).astype(jnp.float32)
+  return X

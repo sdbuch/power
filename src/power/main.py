@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from functools import partial
 
 import jax
 import jax.numpy as jnp
@@ -6,6 +7,11 @@ import tyro
 from jax.experimental.multihost_utils import process_allgather
 
 from power.msign import newtonschulz5, polar_express
+
+EXPERIMENTS = {
+    "ns5": ("NS5", newtonschulz5),
+    "polar": ("Polar Express", polar_express),
+}
 
 
 @dataclass
@@ -29,44 +35,32 @@ def test_msign(args):
   key = jax.random.key(local_seed)
   G = jax.random.normal(key, (args.m, args.n))
   truth = svd_sign(G)
-
   min_dim = min(args.m, args.n)
 
-  if args.experiment in ("ns5", "both"):
-    result = newtonschulz5(G, steps=args.steps_ns5).astype(jnp.float32)
+  def evaluate(name, fn, G, truth, min_dim):
+    result = fn(G).astype(jnp.float32)
     err = jnp.linalg.norm(result - truth) / jnp.linalg.norm(truth)
-    if args.m >= args.n:
-      orth_err = jnp.linalg.norm(
-        result.mT @ result - jnp.eye(min_dim)
-      ) / jnp.linalg.norm(jnp.eye(min_dim))
-    else:
-      orth_err = jnp.linalg.norm(
-        result @ result.mT - jnp.eye(min_dim)
-      ) / jnp.linalg.norm(jnp.eye(min_dim))
+    gram = result.mT @ result if G.shape[-2] >= G.shape[-1] else result @ result.mT
+    orth_err = jnp.linalg.norm(
+        gram - jnp.eye(min_dim)
+    ) / jnp.linalg.norm(jnp.eye(min_dim))
+
     all_err = process_allgather(jnp.array([err]))
     all_orth = process_allgather(jnp.array([orth_err]))
     if jax.process_index() == 0:
-      print(f"NS5 (steps={args.steps_ns5}, n_hosts={len(all_err)}):")
+      print(f"{name} (n_hosts={len(all_err)}):")
       print(f"  mean relative error vs SVD: {jnp.mean(all_err):.6f}")
       print(f"  mean orthogonality error:   {jnp.mean(all_orth):.6f}")
 
-  if args.experiment in ("polar", "both"):
-    result = polar_express(G, steps=args.steps_polar)
-    err = jnp.linalg.norm(result - truth) / jnp.linalg.norm(truth)
-    if args.m >= args.n:
-      orth_err = jnp.linalg.norm(
-        result.mT @ result - jnp.eye(min_dim)
-      ) / jnp.linalg.norm(jnp.eye(min_dim))
-    else:
-      orth_err = jnp.linalg.norm(
-        result @ result.mT - jnp.eye(min_dim)
-      ) / jnp.linalg.norm(jnp.eye(min_dim))
-    all_err = process_allgather(jnp.array([err]))
-    all_orth = process_allgather(jnp.array([orth_err]))
-    if jax.process_index() == 0:
-      print(f"Polar Express (steps={args.steps_polar}, n_hosts={len(all_err)}):")
-      print(f"  mean relative error vs SVD: {jnp.mean(all_err):.6f}")
-      print(f"  mean orthogonality error:   {jnp.mean(all_orth):.6f}")
+  steps = {"ns5": args.steps_ns5, "polar": args.steps_polar}
+  keys = EXPERIMENTS.keys() if args.experiment == "both" else [args.experiment]
+  for key in keys:
+    name, fn = EXPERIMENTS[key]
+    evaluate(
+        f"{name} (steps={steps[key]})",
+        partial(fn, steps=steps[key]),
+        G, truth, min_dim,
+    )
 
 
 def main():

@@ -36,9 +36,9 @@ def test_msign(args):
     result = newtonschulz5(G, steps=args.steps_ns5).astype(jnp.float32)
     err = jnp.linalg.norm(result - truth) / jnp.linalg.norm(truth)
     if args.m >= args.n:
-      orth_err = jnp.linalg.norm(result.mT @ result - jnp.eye(min_dim))
+      orth_err = jnp.linalg.norm(result.mT @ result - jnp.eye(min_dim)) / jnp.linalg.norm(jnp.eye(min_dim))
     else:
-      orth_err = jnp.linalg.norm(result @ result.mT - jnp.eye(min_dim))
+      orth_err = jnp.linalg.norm(result @ result.mT - jnp.eye(min_dim)) / jnp.linalg.norm(jnp.eye(min_dim))
     all_err = process_allgather(jnp.array([err]))
     all_orth = process_allgather(jnp.array([orth_err]))
     if jax.process_index() == 0:
@@ -50,9 +50,9 @@ def test_msign(args):
     result = polar_express(G, steps=args.steps_polar)
     err = jnp.linalg.norm(result - truth) / jnp.linalg.norm(truth)
     if args.m >= args.n:
-      orth_err = jnp.linalg.norm(result.mT @ result - jnp.eye(min_dim))
+      orth_err = jnp.linalg.norm(result.mT @ result - jnp.eye(min_dim)) / jnp.linalg.norm(jnp.eye(min_dim))
     else:
-      orth_err = jnp.linalg.norm(result @ result.mT - jnp.eye(min_dim))
+      orth_err = jnp.linalg.norm(result @ result.mT - jnp.eye(min_dim)) / jnp.linalg.norm(jnp.eye(min_dim))
     all_err = process_allgather(jnp.array([err]))
     all_orth = process_allgather(jnp.array([orth_err]))
     if jax.process_index() == 0:

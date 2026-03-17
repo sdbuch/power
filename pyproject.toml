@@ -16,6 +16,9 @@ tpu = [
     "jax[tpu]>=0.9.1",
 ]
 
+[project.scripts]
+power = "power.main:main"
+
 [tool.uv]
 config-settings = { editable_mode = 'compat' }
 conflicts = [

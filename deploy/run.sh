@@ -4,7 +4,6 @@ TPU_NAME="$1"
 shift
 SSH_FLAGS='-A -o ForwardAgent=yes'
 COMMANDS="if [ ! -d \"power\" ]; then git clone git@github.com:sdbuch/power; fi \
-    && export HYDRA_FULL_ERROR=1 \
     && export LIBTPU_INIT_ARGS='--xla_memory_scheduler=default' \
     && export WANDB_ENTITY='$WANDB_ENTITY' \
     && export WANDB_API_KEY='$WANDB_API_KEY' \
@@ -14,7 +13,7 @@ COMMANDS="if [ ! -d \"power\" ]; then git clone git@github.com:sdbuch/power; fi 
     && git checkout -f main \
     && git pull \
     && uv sync --extra tpu \
-    && uv run python $@"
+    && uv run power $@"
 
 gcloud compute tpus tpu-vm ssh "$TPU_NAME" \
   --ssh-flag="$SSH_FLAGS" \

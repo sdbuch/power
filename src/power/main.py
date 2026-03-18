@@ -106,6 +106,9 @@ def test_msign(args):
 
 
 def main():
-  jax.distributed.initialize()
+  try:
+    jax.distributed.initialize()
+  except ValueError:
+    pass
   args = tyro.cli(Args)
   test_msign(args)

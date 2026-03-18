@@ -56,3 +56,9 @@ ignore = [
     "F841",  # Local variable assigned but not used
     "E731",  # use a def, not a lambda
 ]
+
+[dependency-groups]
+dev = [
+    "ruff>=0.15.6",
+    "ty>=0.0.23",
+]

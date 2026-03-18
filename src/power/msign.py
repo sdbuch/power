@@ -31,6 +31,23 @@ _POLAR_EXPRESS_ABC_STABLE = [
 ] + [_POLAR_EXPRESS_ABC[-1]]
 
 
+def _extract_sigmas(X, L, R):
+  """Extract singular values of X via precomputed SVD bases L, R."""
+  return jnp.diag(L.mT @ X.astype(jnp.float32) @ R)
+
+
+def _setup(G, U, V):
+  """Shared setup: transpose if tall, select SVD bases accordingly."""
+  X = G.astype(jnp.bfloat16)
+  transposed = G.shape[-2] > G.shape[-1]
+  if transposed:
+    X = X.mT
+    L, R = V, U
+  else:
+    L, R = U, V
+  return X, L, R, transposed
+
+
 @jax.jit(static_argnames=("steps",))
 def newtonschulz5(G, steps=5):
   """Newton-Schulz iteration with fixed quintic coefficients (Muon-style).
@@ -55,6 +72,30 @@ def newtonschulz5(G, steps=5):
   if transposed:
     X = X.mT
   return X
+
+
+@jax.jit(static_argnames=("steps",))
+def newtonschulz5_traced(G, U, V, steps=5):
+  """NS5 with per-step singular value tracking."""
+  assert G.ndim == 2
+  a, b, c = _NS5_ABC
+  X, L, R, transposed = _setup(G, U, V)
+  min_dim = min(G.shape)
+
+  X = X / (jnp.linalg.norm(X, axis=(-2, -1), keepdims=True) + 1e-7)
+
+  sigmas = jnp.zeros((steps + 1, min_dim))
+  sigmas = sigmas.at[0].set(_extract_sigmas(X, L, R))
+
+  for i in range(steps):
+    A = X @ X.mT
+    B = b * A + c * A @ A
+    X = a * X + B @ X
+    sigmas = sigmas.at[i + 1].set(_extract_sigmas(X, L, R))
+
+  if transposed:
+    X = X.mT
+  return X, sigmas
 
 
 @jax.jit(static_argnames=("steps",))
@@ -84,3 +125,30 @@ def polar_express(G, steps=10):
   if transposed:
     X = X.mT
   return X
+
+
+@jax.jit(static_argnames=("steps",))
+def polar_express_traced(G, U, V, steps=10):
+  """Polar Express with per-step singular value tracking."""
+  assert G.ndim == 2
+  X, L, R, transposed = _setup(G, U, V)
+  min_dim = min(G.shape)
+
+  X = X / (jnp.linalg.norm(X, axis=(-2, -1), keepdims=True) * 1.01)
+  I = jnp.eye(X.shape[-2], dtype=X.dtype)
+
+  sigmas = jnp.zeros((steps + 1, min_dim))
+  sigmas = sigmas.at[0].set(_extract_sigmas(X, L, R))
+
+  for step in range(steps):
+    idx = min(step, len(_POLAR_EXPRESS_ABC_STABLE) - 1)
+    a, b, c = _POLAR_EXPRESS_ABC_STABLE[idx]
+    S = X @ X.mT
+    Y = c * S + b * I
+    Y = Y @ S + a * I
+    X = Y @ X
+    sigmas = sigmas.at[step + 1].set(_extract_sigmas(X, L, R))
+
+  if transposed:
+    X = X.mT
+  return X, sigmas

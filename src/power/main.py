@@ -29,11 +29,11 @@ CHOLESKY_BF16 = QRConfig(method="cholesky", dtype="bfloat16")
 EXPERIMENTS = {
   "ns5": ("NS5", NS5, "polar"),
   "polar": ("Polar Express", POLAR, "polar"),
-  "newton": ("Newton Polar (fp32)", NEWTON, "polar"),
-  "householder": ("Householder QR (fp32)", HOUSEHOLDER_FP32, "qr"),
-  "householder_bf16": ("Householder QR (bf16)", HOUSEHOLDER_BF16, "qr"),
+  # "newton": ("Newton Polar (fp32)", NEWTON, "polar"),
+  # "householder": ("Householder QR (fp32)", HOUSEHOLDER_FP32, "qr"),
+  # "householder_bf16": ("Householder QR (bf16)", HOUSEHOLDER_BF16, "qr"),
   "cholesky": ("Cholesky QR (fp32)", CHOLESKY_FP32, "qr"),
-  "cholesky_bf16": ("Cholesky QR (bf16)", CHOLESKY_BF16, "qr"),
+  # "cholesky_bf16": ("Cholesky QR (bf16)", CHOLESKY_BF16, "qr"),
 }
 
 GROUPS = {

@@ -6,6 +6,8 @@ Ports of:
     github.com/thinking-machines-lab/manifolds)
 """
 
+from dataclasses import dataclass
+
 import jax
 import jax.numpy as jnp
 import jax.scipy.linalg
@@ -32,13 +34,11 @@ _POLAR_EXPRESS_ABC_STABLE = [
 ] + [_POLAR_EXPRESS_ABC[-1]]
 
 
-### Unified polynomial sign iteration ########################################
-
-from dataclasses import dataclass
+### Polynomial sign iteration ###############################################
 
 
 @dataclass(frozen=True)
-class MSIgnConfig:
+class MSignConfig:
   """Configuration for polynomial matrix sign iteration.
 
   coeffs: per-step (a, b, c) for the quintic p(S) = aI + bS + cS^2.
@@ -46,41 +46,22 @@ class MSIgnConfig:
   steps: number of iterations.
   norm_eps: additive epsilon for normalization: X / (||X|| * norm_scale + norm_eps).
   norm_scale: multiplicative scale for normalization.
+  horner: evaluation form for p(S)X where p(S) = aI + bS + cS^2, S = XX^T.
+           False ("direct"): a*X + (b*S + c*S@S) @ X  (Muon/NS5 original, avoids identity)
+           True ("horner"):  ((c*S + b*I) @ S + a*I) @ X  (Polar Express original)
+           Both are algebraically identical but give different bf16 rounding.
   traced: if True, track per-step singular values and off-diagonal energy.
   """
   coeffs: tuple[tuple[float, float, float], ...]
   steps: int = 5
   norm_eps: float = 0.0
   norm_scale: float = 1.0
-  # Evaluation form for p(S)X where p(S) = aI + bS + cS^2, S = XX^T.
-  # "direct": a*X + (b*S + c*S@S) @ X  (Muon/NS5 original, avoids identity)
-  # "horner": ((c*S + b*I) @ S + a*I) @ X  (Polar Express original, Horner scheme)
-  # Both are algebraically identical but give different bf16 rounding.
   horner: bool = False
   traced: bool = False
 
 
 NS5_COEFFS = (_NS5_ABC,)
 POLAR_COEFFS = tuple(_POLAR_EXPRESS_ABC_STABLE)
-
-
-def ns5_config(steps=5, traced=False):
-  return MSIgnConfig(
-    coeffs=NS5_COEFFS,
-    steps=steps,
-    norm_eps=1e-7,
-    traced=traced,
-  )
-
-
-def polar_config(steps=10, traced=False):
-  return MSIgnConfig(
-    coeffs=POLAR_COEFFS,
-    steps=steps,
-    norm_scale=1.01,
-    horner=True,
-    traced=traced,
-  )
 
 
 @jax.jit(static_argnames=("config",))
@@ -143,7 +124,7 @@ def msign(G, config, U=None, V=None):
   return X, {}
 
 
-### Helpers ##################################################################
+### Newton polar iteration ##################################################
 
 
 def _extract_trace(X, L, R):
@@ -152,134 +133,6 @@ def _extract_trace(X, L, R):
   diag = jnp.diag(M)
   offdiag = jnp.linalg.norm(M - jnp.diag(diag))
   return diag, offdiag
-
-
-def _setup(G, U, V, dtype=jnp.bfloat16):
-  """Shared setup: cast, transpose if tall, select SVD bases accordingly."""
-  X = G.astype(dtype)
-  transposed = G.shape[-2] > G.shape[-1]
-  if transposed:
-    X = X.mT
-    L, R = V, U
-  else:
-    L, R = U, V
-  return X, L, R, transposed
-
-
-@jax.jit(static_argnames=("steps",))
-def newtonschulz5(G, steps=5):
-  """Newton-Schulz iteration with fixed quintic coefficients (Muon-style).
-
-  Computes an approximate polar factor of G in bfloat16.
-  Returns bfloat16.
-  """
-  assert G.ndim >= 2
-  a, b, c = _NS5_ABC
-  X = G.astype(jnp.bfloat16)
-  transposed = G.shape[-2] > G.shape[-1]
-  if transposed:
-    X = X.mT
-
-  X = X / (jnp.linalg.norm(X, axis=(-2, -1), keepdims=True) + 1e-7)
-
-  for _ in range(steps):
-    A = X @ X.mT
-    B = b * A + c * A @ A
-    X = a * X + B @ X
-
-  if transposed:
-    X = X.mT
-  return X
-
-
-@jax.jit(static_argnames=("steps",))
-def newtonschulz5_traced(G, U, V, steps=5):
-  """NS5 with per-step singular value and subspace mixing tracking."""
-  assert G.ndim == 2
-  a, b, c = _NS5_ABC
-  X, L, R, transposed = _setup(G, U, V)
-  min_dim = min(G.shape)
-
-  X = X / (jnp.linalg.norm(X, axis=(-2, -1), keepdims=True) + 1e-7)
-
-  sigmas = jnp.zeros((steps + 1, min_dim))
-  offdiags = jnp.zeros(steps + 1)
-  d, od = _extract_trace(X, L, R)
-  sigmas = sigmas.at[0].set(d)
-  offdiags = offdiags.at[0].set(od)
-
-  for i in range(steps):
-    A = X @ X.mT
-    B = b * A + c * A @ A
-    X = a * X + B @ X
-    d, od = _extract_trace(X, L, R)
-    sigmas = sigmas.at[i + 1].set(d)
-    offdiags = offdiags.at[i + 1].set(od)
-
-  if transposed:
-    X = X.mT
-  return X, sigmas, offdiags
-
-
-@jax.jit(static_argnames=("steps",))
-def polar_express(G, steps=10):
-  """Polar Express matrix sign function.
-
-  Uses step-dependent polynomial coefficients for faster convergence.
-  Returns bfloat16.
-  """
-  assert G.ndim >= 2
-  X = G.astype(jnp.bfloat16)
-  transposed = G.shape[-2] > G.shape[-1]
-  if transposed:
-    X = X.mT
-
-  X = X / (jnp.linalg.norm(X, axis=(-2, -1), keepdims=True) * 1.01)
-  I = jnp.eye(X.shape[-2], dtype=X.dtype)
-
-  for step in range(steps):
-    idx = min(step, len(_POLAR_EXPRESS_ABC_STABLE) - 1)
-    a, b, c = _POLAR_EXPRESS_ABC_STABLE[idx]
-    S = X @ X.mT
-    Y = c * S + b * I
-    Y = Y @ S + a * I
-    X = Y @ X
-
-  if transposed:
-    X = X.mT
-  return X
-
-
-@jax.jit(static_argnames=("steps",))
-def polar_express_traced(G, U, V, steps=10):
-  """Polar Express with per-step singular value and subspace mixing tracking."""
-  assert G.ndim == 2
-  X, L, R, transposed = _setup(G, U, V)
-  min_dim = min(G.shape)
-
-  X = X / (jnp.linalg.norm(X, axis=(-2, -1), keepdims=True) * 1.01)
-  I = jnp.eye(X.shape[-2], dtype=X.dtype)
-
-  sigmas = jnp.zeros((steps + 1, min_dim))
-  offdiags = jnp.zeros(steps + 1)
-  d, od = _extract_trace(X, L, R)
-  sigmas = sigmas.at[0].set(d)
-  offdiags = offdiags.at[0].set(od)
-
-  for step in range(steps):
-    idx = min(step, len(_POLAR_EXPRESS_ABC_STABLE) - 1)
-    a, b, c = _POLAR_EXPRESS_ABC_STABLE[idx]
-    S = X @ X.mT
-    Y = c * S + b * I
-    Y = Y @ S + a * I
-    X = Y @ X
-    d, od = _extract_trace(X, L, R)
-    sigmas = sigmas.at[step + 1].set(d)
-    offdiags = offdiags.at[step + 1].set(od)
-
-  if transposed:
-    X = X.mT
-  return X, sigmas, offdiags
 
 
 def _newton_step(X):
@@ -318,7 +171,13 @@ def newton_polar(G, steps=10):
 def newton_polar_traced(G, U, V, steps=10):
   """Scaled Newton polar iteration with per-step tracking."""
   assert G.ndim == 2
-  X, L, R, transposed = _setup(G, U, V, dtype=jnp.float32)
+  X = G.astype(jnp.float32)
+  transposed = G.shape[-2] > G.shape[-1]
+  if transposed:
+    X = X.mT
+    L, R = V, U
+  else:
+    L, R = U, V
   min_dim = min(G.shape)
 
   X = X / jnp.linalg.norm(X, axis=(-2, -1), keepdims=True)
@@ -338,6 +197,9 @@ def newton_polar_traced(G, U, V, steps=10):
   if transposed:
     X = X.mT
   return X, sigmas, offdiags
+
+
+### QR baselines ############################################################
 
 
 def _signed_qr(X):

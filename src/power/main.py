@@ -7,25 +7,42 @@ import tyro
 from jax.experimental.multihost_utils import process_allgather
 
 from power.msign import (
+  MSIgnConfig,
+  NS5_COEFFS,
+  POLAR_COEFFS,
   cholesky_qr,
   householder_qr,
   householder_qr_bf16,
+  msign,
   newton_polar,
   newton_polar_traced,
+  # Legacy functions for verification.
   newtonschulz5,
   newtonschulz5_traced,
   polar_express,
   polar_express_traced,
 )
 
-# (name, fn, fn_traced, truth_key)
+# Default configs for the polynomial sign iterations.
+NS5 = MSIgnConfig(coeffs=NS5_COEFFS, norm_eps=1e-7)
+POLAR = MSIgnConfig(coeffs=POLAR_COEFFS, norm_scale=1.01, horner=True)
+
+
+def _msign_entry(name, default_config, truth_key):
+  """Build an EXPERIMENTS entry for a polynomial sign iteration."""
+  return (name, default_config, truth_key)
+
+
+# (name, config_or_fn, truth_key)
+# For msign-based experiments, config_or_fn is an MSIgnConfig.
+# For standalone experiments, config_or_fn is (fn, fn_traced) or (fn, None).
 EXPERIMENTS = {
-  "ns5": ("NS5", newtonschulz5, newtonschulz5_traced, "polar"),
-  "polar": ("Polar Express", polar_express, polar_express_traced, "polar"),
-  "newton": ("Newton Polar (fp32)", newton_polar, newton_polar_traced, "polar"),
-  "householder": ("Householder QR (fp32)", householder_qr, None, "qr"),
-  "householder_bf16": ("Householder QR (bf16)", householder_qr_bf16, None, "qr"),
-  "cholesky": ("Cholesky QR (fp32)", cholesky_qr, None, "qr"),
+  "ns5": ("NS5", NS5, "polar"),
+  "polar": ("Polar Express", POLAR, "polar"),
+  "newton": ("Newton Polar (fp32)", (newton_polar, newton_polar_traced), "polar"),
+  "householder": ("Householder QR (fp32)", (householder_qr, None), "qr"),
+  "householder_bf16": ("Householder QR (bf16)", (householder_qr_bf16, None), "qr"),
+  "cholesky": ("Cholesky QR (fp32)", (cholesky_qr, None), "qr"),
 }
 
 GROUPS = {
@@ -47,6 +64,7 @@ class Args:
   steps_newton: int = 10
   seed: int = 42
   trace: bool = False
+  verify: bool = False  # run legacy functions side-by-side and compare
 
 
 def make_matrix(matrix_type, m, n, key):
@@ -73,6 +91,13 @@ def make_truths(G):
   }, sigma, U, Vt.mT
 
 
+# Legacy dispatch for --verify mode.
+_LEGACY = {
+  "ns5": (newtonschulz5, newtonschulz5_traced),
+  "polar": (polar_express, polar_express_traced),
+}
+
+
 def test_msign(args):
   local_seed = args.seed + jax.process_index()
   key = jax.random.key(local_seed)
@@ -83,26 +108,79 @@ def test_msign(args):
   if jax.process_index() == 0:
     print(f"matrix={args.matrix}, shape={G.shape}, kappa={sigma[0] / sigma[-1]:.1f}")
 
-  def evaluate(name, fn, fn_traced, truth_key, G, U, V, min_dim):
+  steps_map = {"ns5": args.steps_ns5, "polar": args.steps_polar, "newton": args.steps_newton}
+
+  def evaluate(name, key, entry, G, U, V, truth_key, min_dim):
     truth = truths[truth_key]
-    if jax.process_index() == 0:
-      print(f"{name} (n_hosts={jax.process_count()}):")
-    if args.trace and fn_traced is not None:
-      result, sigmas, offdiags = fn_traced(G, U, V)
+    config_or_fn = entry
+    s = steps_map.get(key)
+
+    if isinstance(config_or_fn, MSIgnConfig):
+      # Polynomial sign iteration via unified msign.
+      config = MSIgnConfig(
+        coeffs=config_or_fn.coeffs,
+        steps=s if s is not None else config_or_fn.steps,
+        norm_eps=config_or_fn.norm_eps,
+        norm_scale=config_or_fn.norm_scale,
+        horner=config_or_fn.horner,
+        traced=args.trace,
+      )
+      result, aux = msign(G, config, U, V)
       result = result.astype(jnp.float32)
-      if jax.process_index() == 0:
+      label = f"{name} (steps={config.steps})"
+
+      if args.trace and jax.process_index() == 0:
+        sigmas, offdiags = aux["sigmas"], aux["offdiags"]
+        print(f"{label} (n_hosts={jax.process_count()}):")
         print("  singular value evolution (min, median, max) | offdiag norm:")
         for step in range(sigmas.shape[0]):
-          s = sigmas[step]
+          sv = sigmas[step]
           print(
             f"    step {step}: "
-            f"min={jnp.min(s):.6f}  "
-            f"med={jnp.median(s):.6f}  "
-            f"max={jnp.max(s):.6f}  "
+            f"min={jnp.min(sv):.6f}  "
+            f"med={jnp.median(sv):.6f}  "
+            f"max={jnp.max(sv):.6f}  "
             f"| offdiag={offdiags[step]:.6f}"
           )
+      elif jax.process_index() == 0:
+        print(f"{label} (n_hosts={jax.process_count()}):")
+
+      # Verify against legacy if requested.
+      if args.verify and key in _LEGACY:
+        legacy_fn, legacy_fn_traced = _LEGACY[key]
+        legacy_result = legacy_fn(G, steps=config.steps).astype(jnp.float32)
+        diff = jnp.linalg.norm(result - legacy_result)
+        if jax.process_index() == 0:
+          print(f"  legacy verification diff: {diff:.8f}")
+
     else:
-      result = fn(G).astype(jnp.float32)
+      # Standalone method (newton, QR).
+      fn, fn_traced = config_or_fn
+      if s is not None:
+        fn = partial(fn, steps=s)
+        if fn_traced is not None:
+          fn_traced = partial(fn_traced, steps=s)
+      label = f"{name} (steps={s})" if s is not None else name
+
+      if args.trace and fn_traced is not None:
+        result, sigmas, offdiags = fn_traced(G, U, V)
+        result = result.astype(jnp.float32)
+        if jax.process_index() == 0:
+          print(f"{label} (n_hosts={jax.process_count()}):")
+          print("  singular value evolution (min, median, max) | offdiag norm:")
+          for step in range(sigmas.shape[0]):
+            sv = sigmas[step]
+            print(
+              f"    step {step}: "
+              f"min={jnp.min(sv):.6f}  "
+              f"med={jnp.median(sv):.6f}  "
+              f"max={jnp.max(sv):.6f}  "
+              f"| offdiag={offdiags[step]:.6f}"
+            )
+      else:
+        result = fn(G).astype(jnp.float32)
+        if jax.process_index() == 0:
+          print(f"{label} (n_hosts={jax.process_count()}):")
 
     err = jnp.linalg.norm(result - truth) / jnp.linalg.norm(truth)
     gram = result.mT @ result if G.shape[-2] >= G.shape[-1] else result @ result.mT
@@ -116,16 +194,10 @@ def test_msign(args):
       print(f"  mean relative error vs {truth_key} truth: {jnp.mean(all_err):.6f}")
       print(f"  mean orthogonality error:                 {jnp.mean(all_orth):.6f}")
 
-  steps = {"ns5": args.steps_ns5, "polar": args.steps_polar, "newton": args.steps_newton}
   keys = GROUPS.get(args.experiment, [args.experiment])
   for key in keys:
-    name, fn, fn_traced, truth_key = EXPERIMENTS[key]
-    if key in steps:
-      fn = partial(fn, steps=steps[key])
-      if fn_traced is not None:
-        fn_traced = partial(fn_traced, steps=steps[key])
-      name = f"{name} (steps={steps[key]})"
-    evaluate(name, fn, fn_traced, truth_key, G, U, V, min_dim)
+    name, config_or_fn, truth_key = EXPERIMENTS[key]
+    evaluate(name, key, config_or_fn, G, U, V, truth_key, min_dim)
 
 
 def main():

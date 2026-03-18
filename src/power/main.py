@@ -60,7 +60,7 @@ def test_msign(args):
 
   def evaluate(name, fn, fn_traced, G, U, V, truth, min_dim):
     if jax.process_index() == 0:
-      print(f"{name} (n_hosts={jax.host_count()}):")
+      print(f"{name} (n_hosts={jax.process_count()}):")
     if args.trace:
       result, sigmas = fn_traced(G, U, V)
       result = result.astype(jnp.float32)

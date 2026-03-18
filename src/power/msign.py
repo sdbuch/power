@@ -37,25 +37,31 @@ _POLAR_EXPRESS_ABC_STABLE = [
 
 
 def _extract_trace(X, L, R):
-  """Extract diagonal and off-diagonal energy of L^T X R."""
+  """Extract diagonal, off-diagonal energy, and negative count of L^T X R."""
   M = L.mT @ X.astype(jnp.float32) @ R
   diag = jnp.diag(M)
   offdiag = jnp.linalg.norm(M - jnp.diag(diag))
-  return diag, offdiag
+  n_neg = jnp.sum(diag < 0)
+  return diag, offdiag, n_neg
 
 
 def _trace_init(X, L, R, steps, min_dim):
   """Allocate and fill step-0 trace arrays."""
   sigmas = jnp.zeros((steps + 1, min_dim))
   offdiags = jnp.zeros(steps + 1)
-  d, od = _extract_trace(X, L, R)
-  return sigmas.at[0].set(d), offdiags.at[0].set(od)
+  n_negs = jnp.zeros(steps + 1, dtype=jnp.int32)
+  d, od, nn = _extract_trace(X, L, R)
+  return sigmas.at[0].set(d), offdiags.at[0].set(od), n_negs.at[0].set(nn)
 
 
-def _trace_step(X, L, R, sigmas, offdiags, step):
+def _trace_step(X, L, R, sigmas, offdiags, n_negs, step):
   """Record trace arrays at a given step."""
-  d, od = _extract_trace(X, L, R)
-  return sigmas.at[step + 1].set(d), offdiags.at[step + 1].set(od)
+  d, od, nn = _extract_trace(X, L, R)
+  return (
+    sigmas.at[step + 1].set(d),
+    offdiags.at[step + 1].set(od),
+    n_negs.at[step + 1].set(nn),
+  )
 
 
 def _setup_transpose(G, U, V, dtype):
@@ -144,7 +150,7 @@ def msign(G, config, U=None, V=None):
   if config.traced:
     L, R = (V, U) if transposed else (U, V)
     min_dim = min(G.shape[-2], G.shape[-1])
-    sigmas, offdiags = _trace_init(X, L, R, config.steps, min_dim)
+    sigmas, offdiags, n_negs = _trace_init(X, L, R, config.steps, min_dim)
 
   for step in range(config.steps):
     idx = min(step, len(config.coeffs) - 1)
@@ -159,13 +165,13 @@ def msign(G, config, U=None, V=None):
       X = a * X + B @ X
 
     if config.traced:
-      sigmas, offdiags = _trace_step(X, L, R, sigmas, offdiags, step)
+      sigmas, offdiags, n_negs = _trace_step(X, L, R, sigmas, offdiags, n_negs, step)
 
   if transposed:
     X = X.mT
 
   if config.traced:
-    return X, {"sigmas": sigmas, "offdiags": offdiags}
+    return X, {"sigmas": sigmas, "offdiags": offdiags, "n_negs": n_negs}
   return X, {}
 
 
@@ -216,18 +222,18 @@ def newton_polar(G, config, U=None, V=None):
   X = X / jnp.linalg.norm(X, axis=(-2, -1), keepdims=True)
 
   if config.traced:
-    sigmas, offdiags = _trace_init(X, L, R, config.steps, min_dim)
+    sigmas, offdiags, n_negs = _trace_init(X, L, R, config.steps, min_dim)
 
   for i in range(config.steps):
     X = _newton_step(X)
     if config.traced:
-      sigmas, offdiags = _trace_step(X, L, R, sigmas, offdiags, i)
+      sigmas, offdiags, n_negs = _trace_step(X, L, R, sigmas, offdiags, n_negs, i)
 
   if transposed:
     X = X.mT
 
   if config.traced:
-    return X, {"sigmas": sigmas, "offdiags": offdiags}
+    return X, {"sigmas": sigmas, "offdiags": offdiags, "n_negs": n_negs}
   return X, {}
 
 

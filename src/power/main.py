@@ -178,8 +178,8 @@ def test_msign(args):
       print(f"{label} (n_hosts={jax.process_count()}):")
 
     if args.trace and "sigmas" in aux and jax.process_index() == 0:
-      sigmas, offdiags = aux["sigmas"], aux["offdiags"]
-      print("  singular value evolution (min, median, max) | offdiag norm:")
+      sigmas, offdiags, n_negs = aux["sigmas"], aux["offdiags"], aux["n_negs"]
+      print("  singular value evolution (min, median, max) | offdiag | n_neg:")
       for step in range(sigmas.shape[0]):
         sv = sigmas[step]
         print(
@@ -187,7 +187,8 @@ def test_msign(args):
           f"min={jnp.min(sv):.6f}  "
           f"med={jnp.median(sv):.6f}  "
           f"max={jnp.max(sv):.6f}  "
-          f"| offdiag={offdiags[step]:.6f}"
+          f"| offdiag={offdiags[step]:.6f}  "
+          f"| n_neg={n_negs[step]}"
         )
 
     err = jnp.linalg.norm(result - truth) / jnp.linalg.norm(truth)

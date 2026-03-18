@@ -55,6 +55,7 @@ class Args:
   steps_newton: int = 10
   seed: int = 42
   trace: bool = False
+  profile: str = ""  # xprof trace dir (e.g. /tmp/jax-trace); empty disables
 
 
 def make_matrix(matrix_type, m, n, key):
@@ -86,8 +87,12 @@ def make_truths(G):
   )
 
 
-def _dispatch(config, G, U, V, traced):
-  """Call the right function for a config, return (result, aux)."""
+def _dispatch(config, G, U, V, traced, profile_dir=""):
+  """Call the right function for a config, return (result, aux).
+
+  If profile_dir is non-empty, wraps the computation in an xprof trace.
+  Runs a warmup call first so the profile captures compiled execution.
+  """
   if isinstance(config, MSignConfig):
     cfg = MSignConfig(
       coeffs=config.coeffs,
@@ -97,19 +102,34 @@ def _dispatch(config, G, U, V, traced):
       horner=config.horner,
       traced=traced,
     )
-    result, aux = msign(G, cfg, U, V)
-    return result.astype(jnp.float32), aux
+    fn = lambda: msign(G, cfg, U, V)
 
   elif isinstance(config, NewtonPolarConfig):
     cfg = NewtonPolarConfig(steps=config.steps, traced=traced)
-    result, aux = newton_polar(G, cfg, U, V)
-    return result.astype(jnp.float32), aux
+    fn = lambda: newton_polar(G, cfg, U, V)
 
   elif isinstance(config, QRConfig):
-    return qr(G, config).astype(jnp.float32), {}
+    fn = lambda: (qr(G, config), {})
 
   else:
     raise ValueError(f"Unknown config type: {type(config)}")
+
+  # Warmup (triggers compilation).
+  result, aux = fn()
+  jax.block_until_ready(result)
+
+  if profile_dir:
+    jax.profiler.start_trace(profile_dir)
+
+  result, aux = fn()
+  jax.block_until_ready(result)
+
+  if profile_dir:
+    jax.profiler.stop_trace()
+
+  if isinstance(config, (MSignConfig, NewtonPolarConfig)):
+    return result.astype(jnp.float32), aux
+  return result.astype(jnp.float32), {}
 
 
 def _format_label(name, config):
@@ -142,7 +162,8 @@ def test_msign(args):
       config = replace(config, steps=steps_map[key])
 
     truth = truths[truth_key]
-    result, aux = _dispatch(config, G, U, V, args.trace)
+    profile_dir = f"{args.profile}/{key}" if args.profile else ""
+    result, aux = _dispatch(config, G, U, V, args.trace, profile_dir)
     label = _format_label(name, config)
 
     if jax.process_index() == 0:

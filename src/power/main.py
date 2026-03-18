@@ -162,7 +162,15 @@ def test_msign(args):
       config = replace(config, steps=steps_map[key])
 
     truth = truths[truth_key]
-    profile_dir = f"{args.profile}/{key}" if args.profile else ""
+    if args.profile:
+      steps_str = (
+        f"_s{config.steps}"
+        if isinstance(config, (MSignConfig, NewtonPolarConfig))
+        else ""
+      )
+      profile_dir = f"{args.profile}/{args.matrix}_{args.m}x{args.n}/{key}{steps_str}"
+    else:
+      profile_dir = ""
     result, aux = _dispatch(config, G, U, V, args.trace, profile_dir)
     label = _format_label(name, config)
 

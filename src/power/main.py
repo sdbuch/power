@@ -23,6 +23,7 @@ NEWTON = NewtonPolarConfig()
 HOUSEHOLDER_FP32 = QRConfig(method="householder", dtype="float32")
 HOUSEHOLDER_BF16 = QRConfig(method="householder", dtype="bfloat16")
 CHOLESKY_FP32 = QRConfig(method="cholesky", dtype="float32")
+CHOLESKY_BF16 = QRConfig(method="cholesky", dtype="bfloat16")
 
 # (name, config, truth_key)
 EXPERIMENTS = {
@@ -32,6 +33,7 @@ EXPERIMENTS = {
   "householder": ("Householder QR (fp32)", HOUSEHOLDER_FP32, "qr"),
   "householder_bf16": ("Householder QR (bf16)", HOUSEHOLDER_BF16, "qr"),
   "cholesky": ("Cholesky QR (fp32)", CHOLESKY_FP32, "qr"),
+  "cholesky_bf16": ("Cholesky QR (bf16)", CHOLESKY_BF16, "qr"),
 }
 
 GROUPS = {

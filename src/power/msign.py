@@ -32,6 +32,120 @@ _POLAR_EXPRESS_ABC_STABLE = [
 ] + [_POLAR_EXPRESS_ABC[-1]]
 
 
+### Unified polynomial sign iteration ########################################
+
+from dataclasses import dataclass
+
+
+@dataclass(frozen=True)
+class MSIgnConfig:
+  """Configuration for polynomial matrix sign iteration.
+
+  coeffs: per-step (a, b, c) for the quintic p(S) = aI + bS + cS^2.
+           If fewer entries than steps, the last entry is repeated.
+  steps: number of iterations.
+  norm_eps: additive epsilon for normalization: X / (||X|| * norm_scale + norm_eps).
+  norm_scale: multiplicative scale for normalization.
+  traced: if True, track per-step singular values and off-diagonal energy.
+  """
+  coeffs: tuple[tuple[float, float, float], ...]
+  steps: int = 5
+  norm_eps: float = 0.0
+  norm_scale: float = 1.0
+  # Evaluation form for p(S)X where p(S) = aI + bS + cS^2, S = XX^T.
+  # "direct": a*X + (b*S + c*S@S) @ X  (Muon/NS5 original, avoids identity)
+  # "horner": ((c*S + b*I) @ S + a*I) @ X  (Polar Express original, Horner scheme)
+  # Both are algebraically identical but give different bf16 rounding.
+  horner: bool = False
+  traced: bool = False
+
+
+NS5_COEFFS = (_NS5_ABC,)
+POLAR_COEFFS = tuple(_POLAR_EXPRESS_ABC_STABLE)
+
+
+def ns5_config(steps=5, traced=False):
+  return MSIgnConfig(
+    coeffs=NS5_COEFFS,
+    steps=steps,
+    norm_eps=1e-7,
+    traced=traced,
+  )
+
+
+def polar_config(steps=10, traced=False):
+  return MSIgnConfig(
+    coeffs=POLAR_COEFFS,
+    steps=steps,
+    norm_scale=1.01,
+    horner=True,
+    traced=traced,
+  )
+
+
+@jax.jit(static_argnames=("config",))
+def msign(G, config, U=None, V=None):
+  """Unified polynomial matrix sign iteration.
+
+  Computes approximate polar factor of G in bfloat16 via the quintic
+  polynomial iteration X_{k+1} = (a_k I + b_k S + c_k S^2) X_k
+  where S = X_k X_k^T.
+
+  When config.traced=True, U and V (precomputed fp32 SVD bases of G)
+  must be provided for per-step telemetry.
+
+  Returns (X, aux) where aux is {} when not traced, or
+  {"sigmas": (steps+1, min_dim), "offdiags": (steps+1,)} when traced.
+  """
+  assert G.ndim >= 2
+  X = G.astype(jnp.bfloat16)
+  transposed = G.shape[-2] > G.shape[-1]
+  if transposed:
+    X = X.mT
+
+  norm = jnp.linalg.norm(X, axis=(-2, -1), keepdims=True)
+  X = X / (norm * config.norm_scale + config.norm_eps)
+
+  if config.horner:
+    I = jnp.eye(X.shape[-2], dtype=X.dtype)
+
+  if config.traced:
+    L, R = (V, U) if transposed else (U, V)
+    min_dim = min(G.shape[-2], G.shape[-1])
+    sigmas = jnp.zeros((config.steps + 1, min_dim))
+    offdiags = jnp.zeros(config.steps + 1)
+    d, od = _extract_trace(X, L, R)
+    sigmas = sigmas.at[0].set(d)
+    offdiags = offdiags.at[0].set(od)
+
+  for step in range(config.steps):
+    idx = min(step, len(config.coeffs) - 1)
+    a, b, c = config.coeffs[idx]
+    S = X @ X.mT
+    if config.horner:
+      Y = c * S + b * I
+      Y = Y @ S + a * I
+      X = Y @ X
+    else:
+      B = b * S + c * S @ S
+      X = a * X + B @ X
+
+    if config.traced:
+      d, od = _extract_trace(X, L, R)
+      sigmas = sigmas.at[step + 1].set(d)
+      offdiags = offdiags.at[step + 1].set(od)
+
+  if transposed:
+    X = X.mT
+
+  if config.traced:
+    return X, {"sigmas": sigmas, "offdiags": offdiags}
+  return X, {}
+
+
+### Helpers ##################################################################
+
+
 def _extract_trace(X, L, R):
   """Extract diagonal and off-diagonal energy of L^T X R."""
   M = L.mT @ X.astype(jnp.float32) @ R

@@ -62,17 +62,18 @@ def test_msign(args):
     if jax.process_index() == 0:
       print(f"{name} (n_hosts={jax.process_count()}):")
     if args.trace:
-      result, sigmas = fn_traced(G, U, V)
+      result, sigmas, offdiags = fn_traced(G, U, V)
       result = result.astype(jnp.float32)
       if jax.process_index() == 0:
-        print("  singular value evolution (min, median, max):")
+        print("  singular value evolution (min, median, max) | offdiag norm:")
         for step in range(sigmas.shape[0]):
           s = sigmas[step]
           print(
             f"    step {step}: "
             f"min={jnp.min(s):.6f}  "
             f"med={jnp.median(s):.6f}  "
-            f"max={jnp.max(s):.6f}"
+            f"max={jnp.max(s):.6f}  "
+            f"| offdiag={offdiags[step]:.6f}"
           )
     else:
       result = fn(G).astype(jnp.float32)

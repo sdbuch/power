@@ -31,9 +31,12 @@ _POLAR_EXPRESS_ABC_STABLE = [
 ] + [_POLAR_EXPRESS_ABC[-1]]
 
 
-def _extract_sigmas(X, L, R):
-  """Extract singular values of X via precomputed SVD bases L, R."""
-  return jnp.diag(L.mT @ X.astype(jnp.float32) @ R)
+def _extract_trace(X, L, R):
+  """Extract diagonal and off-diagonal energy of L^T X R."""
+  M = L.mT @ X.astype(jnp.float32) @ R
+  diag = jnp.diag(M)
+  offdiag = jnp.linalg.norm(M - jnp.diag(diag))
+  return diag, offdiag
 
 
 def _setup(G, U, V):
@@ -76,7 +79,7 @@ def newtonschulz5(G, steps=5):
 
 @jax.jit(static_argnames=("steps",))
 def newtonschulz5_traced(G, U, V, steps=5):
-  """NS5 with per-step singular value tracking."""
+  """NS5 with per-step singular value and subspace mixing tracking."""
   assert G.ndim == 2
   a, b, c = _NS5_ABC
   X, L, R, transposed = _setup(G, U, V)
@@ -85,17 +88,22 @@ def newtonschulz5_traced(G, U, V, steps=5):
   X = X / (jnp.linalg.norm(X, axis=(-2, -1), keepdims=True) + 1e-7)
 
   sigmas = jnp.zeros((steps + 1, min_dim))
-  sigmas = sigmas.at[0].set(_extract_sigmas(X, L, R))
+  offdiags = jnp.zeros(steps + 1)
+  d, od = _extract_trace(X, L, R)
+  sigmas = sigmas.at[0].set(d)
+  offdiags = offdiags.at[0].set(od)
 
   for i in range(steps):
     A = X @ X.mT
     B = b * A + c * A @ A
     X = a * X + B @ X
-    sigmas = sigmas.at[i + 1].set(_extract_sigmas(X, L, R))
+    d, od = _extract_trace(X, L, R)
+    sigmas = sigmas.at[i + 1].set(d)
+    offdiags = offdiags.at[i + 1].set(od)
 
   if transposed:
     X = X.mT
-  return X, sigmas
+  return X, sigmas, offdiags
 
 
 @jax.jit(static_argnames=("steps",))
@@ -129,7 +137,7 @@ def polar_express(G, steps=10):
 
 @jax.jit(static_argnames=("steps",))
 def polar_express_traced(G, U, V, steps=10):
-  """Polar Express with per-step singular value tracking."""
+  """Polar Express with per-step singular value and subspace mixing tracking."""
   assert G.ndim == 2
   X, L, R, transposed = _setup(G, U, V)
   min_dim = min(G.shape)
@@ -138,7 +146,10 @@ def polar_express_traced(G, U, V, steps=10):
   I = jnp.eye(X.shape[-2], dtype=X.dtype)
 
   sigmas = jnp.zeros((steps + 1, min_dim))
-  sigmas = sigmas.at[0].set(_extract_sigmas(X, L, R))
+  offdiags = jnp.zeros(steps + 1)
+  d, od = _extract_trace(X, L, R)
+  sigmas = sigmas.at[0].set(d)
+  offdiags = offdiags.at[0].set(od)
 
   for step in range(steps):
     idx = min(step, len(_POLAR_EXPRESS_ABC_STABLE) - 1)
@@ -147,8 +158,10 @@ def polar_express_traced(G, U, V, steps=10):
     Y = c * S + b * I
     Y = Y @ S + a * I
     X = Y @ X
-    sigmas = sigmas.at[step + 1].set(_extract_sigmas(X, L, R))
+    d, od = _extract_trace(X, L, R)
+    sigmas = sigmas.at[step + 1].set(d)
+    offdiags = offdiags.at[step + 1].set(od)
 
   if transposed:
     X = X.mT
-  return X, sigmas
+  return X, sigmas, offdiags

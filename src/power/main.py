@@ -1,5 +1,4 @@
 from dataclasses import dataclass
-from functools import partial
 
 import jax
 import jax.numpy as jnp
@@ -7,31 +6,32 @@ import tyro
 from jax.experimental.multihost_utils import process_allgather
 
 from power.msign import (
-  MSIgnConfig,
   NS5_COEFFS,
   POLAR_COEFFS,
-  cholesky_qr,
-  householder_qr,
-  householder_qr_bf16,
+  MSignConfig,
+  NewtonPolarConfig,
+  QRConfig,
   msign,
   newton_polar,
-  newton_polar_traced,
+  qr,
 )
 
-# Default configs for the polynomial sign iterations.
-NS5 = MSIgnConfig(coeffs=NS5_COEFFS, norm_eps=1e-7)
-POLAR = MSIgnConfig(coeffs=POLAR_COEFFS, norm_scale=1.01, horner=True)
+# Default configs.
+NS5 = MSignConfig(coeffs=NS5_COEFFS, norm_eps=1e-7)
+POLAR = MSignConfig(coeffs=POLAR_COEFFS, norm_scale=1.01, horner=True)
+NEWTON = NewtonPolarConfig()
+HOUSEHOLDER_FP32 = QRConfig(method="householder", dtype="float32")
+HOUSEHOLDER_BF16 = QRConfig(method="householder", dtype="bfloat16")
+CHOLESKY_FP32 = QRConfig(method="cholesky", dtype="float32")
 
-# (name, config_or_fn, truth_key)
-# For msign-based experiments, config_or_fn is an MSIgnConfig.
-# For standalone experiments, config_or_fn is (fn, fn_traced) or (fn, None).
+# (name, config, truth_key)
 EXPERIMENTS = {
   "ns5": ("NS5", NS5, "polar"),
   "polar": ("Polar Express", POLAR, "polar"),
-  "newton": ("Newton Polar (fp32)", (newton_polar, newton_polar_traced), "polar"),
-  "householder": ("Householder QR (fp32)", (householder_qr, None), "qr"),
-  "householder_bf16": ("Householder QR (bf16)", (householder_qr_bf16, None), "qr"),
-  "cholesky": ("Cholesky QR (fp32)", (cholesky_qr, None), "qr"),
+  "newton": ("Newton Polar (fp32)", NEWTON, "polar"),
+  "householder": ("Householder QR (fp32)", HOUSEHOLDER_FP32, "qr"),
+  "householder_bf16": ("Householder QR (bf16)", HOUSEHOLDER_BF16, "qr"),
+  "cholesky": ("Cholesky QR (fp32)", CHOLESKY_FP32, "qr"),
 }
 
 GROUPS = {
@@ -73,10 +73,47 @@ def make_matrix(matrix_type, m, n, key):
 def make_truths(G):
   """Compute ground truth targets for each method family."""
   U, sigma, Vt = jnp.linalg.svd(G, full_matrices=False)
-  return {
-    "polar": U @ Vt,
-    "qr": householder_qr(G),
-  }, sigma, U, Vt.mT
+  return (
+    {
+      "polar": U @ Vt,
+      "qr": qr(G, HOUSEHOLDER_FP32),
+    },
+    sigma,
+    U,
+    Vt.mT,
+  )
+
+
+def _dispatch(config, G, U, V, traced):
+  """Call the right function for a config, return (result, aux)."""
+  if isinstance(config, MSignConfig):
+    cfg = MSignConfig(
+      coeffs=config.coeffs,
+      steps=config.steps,
+      norm_eps=config.norm_eps,
+      norm_scale=config.norm_scale,
+      horner=config.horner,
+      traced=traced,
+    )
+    result, aux = msign(G, cfg, U, V)
+    return result.astype(jnp.float32), aux
+
+  elif isinstance(config, NewtonPolarConfig):
+    cfg = NewtonPolarConfig(steps=config.steps, traced=traced)
+    result, aux = newton_polar(G, cfg, U, V)
+    return result.astype(jnp.float32), aux
+
+  elif isinstance(config, QRConfig):
+    return qr(G, config).astype(jnp.float32), {}
+
+  else:
+    raise ValueError(f"Unknown config type: {type(config)}")
+
+
+def _format_label(name, config):
+  if isinstance(config, (MSignConfig, NewtonPolarConfig)):
+    return f"{name} (steps={config.steps})"
+  return name
 
 
 def test_msign(args):
@@ -89,66 +126,38 @@ def test_msign(args):
   if jax.process_index() == 0:
     print(f"matrix={args.matrix}, shape={G.shape}, kappa={sigma[0] / sigma[-1]:.1f}")
 
-  steps_map = {"ns5": args.steps_ns5, "polar": args.steps_polar, "newton": args.steps_newton}
+  steps_map = {
+    "ns5": args.steps_ns5,
+    "polar": args.steps_polar,
+    "newton": args.steps_newton,
+  }
 
-  def evaluate(name, key, entry, G, U, V, truth_key, min_dim):
+  def evaluate(name, key, config, G, U, V, truth_key, min_dim):
+    # Override steps from CLI if applicable.
+    if key in steps_map and isinstance(config, (MSignConfig, NewtonPolarConfig)):
+      from dataclasses import replace
+
+      config = replace(config, steps=steps_map[key])
+
     truth = truths[truth_key]
-    s = steps_map.get(key)
+    result, aux = _dispatch(config, G, U, V, args.trace)
+    label = _format_label(name, config)
 
-    if isinstance(entry, MSIgnConfig):
-      config = MSIgnConfig(
-        coeffs=entry.coeffs,
-        steps=s if s is not None else entry.steps,
-        norm_eps=entry.norm_eps,
-        norm_scale=entry.norm_scale,
-        horner=entry.horner,
-        traced=args.trace,
-      )
-      result, aux = msign(G, config, U, V)
-      result = result.astype(jnp.float32)
-      label = f"{name} (steps={config.steps})"
+    if jax.process_index() == 0:
+      print(f"{label} (n_hosts={jax.process_count()}):")
 
-      if jax.process_index() == 0:
-        print(f"{label} (n_hosts={jax.process_count()}):")
-      if args.trace and jax.process_index() == 0:
-        sigmas, offdiags = aux["sigmas"], aux["offdiags"]
-        print("  singular value evolution (min, median, max) | offdiag norm:")
-        for step in range(sigmas.shape[0]):
-          sv = sigmas[step]
-          print(
-            f"    step {step}: "
-            f"min={jnp.min(sv):.6f}  "
-            f"med={jnp.median(sv):.6f}  "
-            f"max={jnp.max(sv):.6f}  "
-            f"| offdiag={offdiags[step]:.6f}"
-          )
-    else:
-      fn, fn_traced = entry
-      if s is not None:
-        fn = partial(fn, steps=s)
-        if fn_traced is not None:
-          fn_traced = partial(fn_traced, steps=s)
-      label = f"{name} (steps={s})" if s is not None else name
-
-      if args.trace and fn_traced is not None:
-        result, sigmas, offdiags = fn_traced(G, U, V)
-        result = result.astype(jnp.float32)
-        if jax.process_index() == 0:
-          print(f"{label} (n_hosts={jax.process_count()}):")
-          print("  singular value evolution (min, median, max) | offdiag norm:")
-          for step in range(sigmas.shape[0]):
-            sv = sigmas[step]
-            print(
-              f"    step {step}: "
-              f"min={jnp.min(sv):.6f}  "
-              f"med={jnp.median(sv):.6f}  "
-              f"max={jnp.max(sv):.6f}  "
-              f"| offdiag={offdiags[step]:.6f}"
-            )
-      else:
-        result = fn(G).astype(jnp.float32)
-        if jax.process_index() == 0:
-          print(f"{label} (n_hosts={jax.process_count()}):")
+    if args.trace and "sigmas" in aux and jax.process_index() == 0:
+      sigmas, offdiags = aux["sigmas"], aux["offdiags"]
+      print("  singular value evolution (min, median, max) | offdiag norm:")
+      for step in range(sigmas.shape[0]):
+        sv = sigmas[step]
+        print(
+          f"    step {step}: "
+          f"min={jnp.min(sv):.6f}  "
+          f"med={jnp.median(sv):.6f}  "
+          f"max={jnp.max(sv):.6f}  "
+          f"| offdiag={offdiags[step]:.6f}"
+        )
 
     err = jnp.linalg.norm(result - truth) / jnp.linalg.norm(truth)
     gram = result.mT @ result if G.shape[-2] >= G.shape[-1] else result @ result.mT
@@ -164,8 +173,8 @@ def test_msign(args):
 
   keys = GROUPS.get(args.experiment, [args.experiment])
   for key in keys:
-    name, entry, truth_key = EXPERIMENTS[key]
-    evaluate(name, key, entry, G, U, V, truth_key, min_dim)
+    name, config, truth_key = EXPERIMENTS[key]
+    evaluate(name, key, config, G, U, V, truth_key, min_dim)
 
 
 def main():

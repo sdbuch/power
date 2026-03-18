@@ -8,6 +8,7 @@ Ports of:
 
 import jax
 import jax.numpy as jnp
+import jax.scipy.linalg
 
 # Muon NS5: fixed quintic coefficients maximizing slope at zero.
 _NS5_ABC = (3.4445, -4.7750, 2.0315)
@@ -39,9 +40,9 @@ def _extract_trace(X, L, R):
   return diag, offdiag
 
 
-def _setup(G, U, V):
-  """Shared setup: transpose if tall, select SVD bases accordingly."""
-  X = G.astype(jnp.bfloat16)
+def _setup(G, U, V, dtype=jnp.bfloat16):
+  """Shared setup: cast, transpose if tall, select SVD bases accordingly."""
+  X = G.astype(dtype)
   transposed = G.shape[-2] > G.shape[-1]
   if transposed:
     X = X.mT
@@ -165,3 +166,112 @@ def polar_express_traced(G, U, V, steps=10):
   if transposed:
     X = X.mT
   return X, sigmas, offdiags
+
+
+def _newton_step(X):
+  """Scaled Newton step for polar decomposition. Cubic convergence."""
+  m = X.shape[-2]
+  gram = X @ X.mT
+  gamma = jnp.exp(-jnp.linalg.slogdet(gram)[1] / (2 * m))
+  return (gamma * X + jnp.linalg.solve(gram, X) / gamma) / 2
+
+
+@jax.jit(static_argnames=("steps",))
+def newton_polar(G, steps=10):
+  """Scaled Newton iteration for polar decomposition via matrix solve.
+
+  BLAS3 baseline: X_{k+1} = (γ X_k + γ^{-1} (X_k X_k^T)^{-1} X_k) / 2,
+  where γ = det(X_k X_k^T)^{-1/(2m)}.
+  Cubic convergence. Runs in fp32.
+  """
+  assert G.ndim >= 2
+  X = G.astype(jnp.float32)
+  transposed = G.shape[-2] > G.shape[-1]
+  if transposed:
+    X = X.mT
+
+  X = X / jnp.linalg.norm(X, axis=(-2, -1), keepdims=True)
+
+  for _ in range(steps):
+    X = _newton_step(X)
+
+  if transposed:
+    X = X.mT
+  return X
+
+
+@jax.jit(static_argnames=("steps",))
+def newton_polar_traced(G, U, V, steps=10):
+  """Scaled Newton polar iteration with per-step tracking."""
+  assert G.ndim == 2
+  X, L, R, transposed = _setup(G, U, V, dtype=jnp.float32)
+  min_dim = min(G.shape)
+
+  X = X / jnp.linalg.norm(X, axis=(-2, -1), keepdims=True)
+
+  sigmas = jnp.zeros((steps + 1, min_dim))
+  offdiags = jnp.zeros(steps + 1)
+  d, od = _extract_trace(X, L, R)
+  sigmas = sigmas.at[0].set(d)
+  offdiags = offdiags.at[0].set(od)
+
+  for i in range(steps):
+    X = _newton_step(X)
+    d, od = _extract_trace(X, L, R)
+    sigmas = sigmas.at[i + 1].set(d)
+    offdiags = offdiags.at[i + 1].set(od)
+
+  if transposed:
+    X = X.mT
+  return X, sigmas, offdiags
+
+
+def _signed_qr(X):
+  """QR with positive-diagonal R (unique Q)."""
+  Q, R = jnp.linalg.qr(X)
+  signs = jnp.sign(jnp.diag(R))
+  return Q * signs
+
+
+@jax.jit
+def householder_qr(G):
+  """Q factor via Householder QR. Single-shot, no iterations.
+
+  Returns Q (same shape as G) in fp32, with positive-diagonal R convention.
+  """
+  assert G.ndim >= 2
+  return _signed_qr(G.astype(jnp.float32))
+
+
+@jax.jit
+def householder_qr_bf16(G):
+  """Q factor via Householder QR on bf16 input.
+
+  Casts input to bf16 before QR (JAX may upcast internally for LAPACK).
+  Returns Q in fp32, with positive-diagonal R convention.
+  """
+  assert G.ndim >= 2
+  return _signed_qr(G.astype(jnp.bfloat16).astype(jnp.float32))
+
+
+@jax.jit
+def cholesky_qr(G):
+  """Q factor via Cholesky QR: R = chol(G^T G), Q = G R^{-1}. Single-shot.
+
+  Less stable than Householder for ill-conditioned G, but pure BLAS3.
+  Cholesky R has positive diagonal by construction.
+  Returns Q (same shape as G) in fp32.
+  """
+  assert G.ndim >= 2
+  X = G.astype(jnp.float32)
+  transposed = G.shape[-2] < G.shape[-1]
+  if transposed:
+    X = X.mT
+
+  R = jnp.linalg.cholesky(X.mT @ X, upper=True)
+  # Q = X R^{-1}: solve R^T Q^T = X^T (lower triangular system)
+  Q = jax.scipy.linalg.solve_triangular(R.mT, X.mT, lower=True).mT
+
+  if transposed:
+    Q = Q.mT
+  return Q
